@@ -2,7 +2,6 @@
 ============================================================================
 APPLICATION STREAMLIT — ANALYSE DE SURVIE : CONTRACEPTION MODERNE
 EDS Cameroun 2018
-Auteure : Ariane Kamguen Yolong Sonita
 Superviseur : Pr. Nguefack Tsague Georges
 
 CHARGEMENT DES MODÈLES :
@@ -699,36 +698,138 @@ elif onglet_choisi == "🔮 Prédiction individuelle":
     if st.button("🔮 Calculer la prédiction", type="primary", use_container_width=True):
         surv_fn = rsf_mod.predict_survival_function(profil_saisie)[0]
 
-        horizons = [5, 10, 15, 20, 25]
-        probs = {}
+        # ── Limite temporelle selon la tranche d'âge ─────────────────────────
+        age_min_par_groupe = {1:15, 2:20, 3:25, 4:30, 5:35, 6:40, 7:45}
+        age_min = age_min_par_groupe[ga]
+        t_max   = 49 - age_min
+
+        # Tronquer la courbe au temps max plausible
+        mask   = surv_fn.x <= t_max
+        times_ = surv_fn.x[mask]
+        survs_ = surv_fn.y[mask]
+
+        # ── Temps médian prédit ───────────────────────────────────────────────
+        # C'est le t pour lequel S(t) <= 0.5 (50% des femmes similaires
+        # ont adopté avant ce délai)
+        idx50 = np.searchsorted(-survs_, -0.5)  # premier t où S(t) <= 0.5
+        if idx50 < len(times_) and survs_[idx50] <= 0.5:
+            t_median = float(times_[idx50])
+            age_median = age_min + t_median
+            median_txt  = f"{t_median:.1f} ans après le premier rapport"
+            age_txt     = f"soit vers {age_median:.0f} ans"
+            median_atteint = True
+        else:
+            t_median = None
+            median_txt  = "Non atteint dans la période d'observation"
+            age_txt     = f"(S(t) reste > 50% jusqu'à {t_max} ans)"
+            median_atteint = False
+
+        # ── Quantiles 25% et 75% ─────────────────────────────────────────────
+        def get_quantile(q):
+            idx_q = np.searchsorted(-survs_, -(1-q))
+            if idx_q < len(times_) and survs_[idx_q] <= (1-q):
+                return float(times_[idx_q])
+            return None
+
+        t_q25 = get_quantile(0.25)  # 25% ont adopté avant t_q25
+        t_q75 = get_quantile(0.75)  # 75% ont adopté avant t_q75
+
+        # ── Probabilité S(t) à quelques horizons clés ─────────────────────────
+        horizons_tous = [5, 10, 15, 20, 25, 30]
+        horizons = [h for h in horizons_tous if h <= t_max]
+        probs_non = {}
         for h in horizons:
-            idx = np.searchsorted(surv_fn.x, h)
-            idx = min(idx, len(surv_fn.y) - 1)
-            probs[h] = surv_fn.y[idx]
+            i_h = min(np.searchsorted(times_, h), len(survs_) - 1)
+            probs_non[h] = float(survs_[i_h])
 
-        st.markdown('<div class="section-header">Résultats</div>', unsafe_allow_html=True)
+        # ── Affichage ─────────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">Délai prédit avant adoption</div>',
+                    unsafe_allow_html=True)
 
-        cols = st.columns(len(horizons))
-        for i, h in enumerate(horizons):
-            p_adoption = 1 - probs[h]
-            cols[i].metric(f"À {h} ans", f"{p_adoption*100:.1f}%", "prob. adoption")
+        st.info(
+            "**Comment lire ces résultats :** Le modèle estime le **délai attendu "
+            "(en années depuis le premier rapport sexuel)** avant qu'une femme ayant "
+            "ce profil adopte une contraception moderne. "
+            f"L'horizon maximal est **{t_max} ans** (tranche {age_lbl}, "
+            f"âge min = {age_min} ans, fin période reproductive = 49 ans)."
+        )
 
-        fig_ind, ax_ind = plt.subplots(figsize=(8, 4))
-        ax_ind.step(surv_fn.x, surv_fn.y, where='post', color='#2A9D8F', linewidth=2.5)
-        ax_ind.fill_between(surv_fn.x, surv_fn.y, step='post', alpha=0.15, color='#2A9D8F')
+        # Métriques principales : délais
+        c1, c2, c3 = st.columns(3)
+        c1.metric(
+            "⏱️ Délai médian d'adoption",
+            median_txt,
+            age_txt
+        )
+        c2.metric(
+            "⏱️ Délai Q25 (adoption précoce)",
+            f"{t_q25:.1f} ans" if t_q25 else "Non atteint",
+            "25% adoptent avant ce délai"
+        )
+        c3.metric(
+            "⏱️ Délai Q75 (adoption tardive)",
+            f"{t_q75:.1f} ans" if t_q75 else "Non atteint",
+            "75% adoptent avant ce délai"
+        )
+
+        # Tableau des probabilités de non-adoption aux horizons clés
+        if horizons:
+            st.markdown("**Probabilité de ne pas encore avoir adopté à chaque horizon :**")
+            cols_h = st.columns(len(horizons))
+            for i, h in enumerate(horizons):
+                s_h = probs_non[h]
+                cols_h[i].metric(
+                    f"À {h} ans",
+                    f"S(t) = {s_h*100:.0f}%",
+                    f"{(1-s_h)*100:.0f}% ont adopté"
+                )
+
+        # ── Courbe de survie S(t) ─────────────────────────────────────────────
+        fig_ind, ax_ind = plt.subplots(figsize=(9, 5))
+
+        ax_ind.step(times_, survs_, where='post',
+                    color='#2A9D8F', linewidth=2.5, label='S(t) — non-adoption')
+        ax_ind.fill_between(times_, survs_, step='post',
+                            alpha=0.12, color='#2A9D8F')
+
+        # Ligne médiane
+        if median_atteint:
+            ax_ind.axhline(0.5, color='gray', linestyle='--', linewidth=1,
+                           alpha=0.7, label='Seuil 50%')
+            ax_ind.axvline(t_median, color='#E63946', linestyle='--',
+                           linewidth=1.5, label=f'Délai médian = {t_median:.1f} ans')
+            ax_ind.annotate(
+                f"Délai médian\n{t_median:.1f} ans\n(~{age_median:.0f} ans)",
+                xy=(t_median, 0.5),
+                xytext=(t_median + 1, 0.62),
+                fontsize=9, color='#E63946',
+                arrowprops=dict(arrowstyle='->', color='#E63946', lw=1.5)
+            )
+
+        # Points aux horizons
         for h in horizons:
-            idx = min(np.searchsorted(surv_fn.x, h), len(surv_fn.y)-1)
-            ax_ind.plot(h, surv_fn.y[idx], 'o', color='#E63946', markersize=7, zorder=5)
-            ax_ind.text(h, surv_fn.y[idx]+0.02, f'{surv_fn.y[idx]*100:.0f}%',
-                        ha='center', fontsize=8, color='#E63946')
-        ax_ind.set_xlabel("Temps depuis premier rapport (années)", fontsize=11)
+            i_h = min(np.searchsorted(times_, h), len(survs_) - 1)
+            ax_ind.plot(h, survs_[i_h], 'o', color='#457B9D',
+                        markersize=6, zorder=5)
+
+        ax_ind.set_xlabel("Années depuis le premier rapport sexuel", fontsize=11)
         ax_ind.set_ylabel("Probabilité de non-adoption S(t)", fontsize=11)
-        ax_ind.set_title("Courbe de survie prédite — Profil individuel", fontsize=12, fontweight='bold')
-        ax_ind.grid(True, alpha=0.25); ax_ind.set_ylim(0, 1.05)
+        ax_ind.set_title(
+            f"Délai prédit avant adoption — Profil : {age_lbl} / {instr_lbl} / "
+            f"{milieu_lbl} / {quint_lbl}",
+            fontsize=11, fontweight='bold'
+        )
+        ax_ind.set_xlim(0, t_max + 0.5)
+        ax_ind.set_ylim(0, 1.05)
+        ax_ind.legend(fontsize=9, loc='upper right')
+        ax_ind.grid(True, alpha=0.25)
+        plt.tight_layout()
+
         st.pyplot(fig_ind)
         st.download_button("📥 Télécharger la courbe",
                             data=fig_to_bytes(fig_ind),
-                            file_name="prediction_individuelle.png", mime="image/png")
+                            file_name="delai_adoption_predit.png",
+                            mime="image/png")
         plt.close()
 
 # ============================================================================
